@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loremium 管理面板</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%234f46e5'/%3E%3Ctext x='16' y='23' font-size='20' font-family='sans-serif' fill='white' text-anchor='middle'%3EL%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/vendor/pico.min.css">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/js/boot.js"></script>
+  <script defer src="/js/app.js"></script>
+  <script defer src="/vendor/alpine.min.js"></script>
+</head>
+<body x-data="admin" x-init="init()">
+  <header class="container">
+    <div class="brand">
+      <h1>Loremium</h1>
+      <span class="muted">管理面板</span>
+    </div>
+    <nav class="tabs" aria-label="主导航">
+      <button :class="{active: tab==='dashboard'}" @click="setTab('dashboard')">仪表盘</button>
+      <button :class="{active: tab==='limits'}" @click="setTab('limits')">限流</button>
+      <button :class="{active: tab==='keys'}" @click="setTab('keys')">API Keys</button>
+      <button :class="{active: tab==='content'}" @click="setTab('content')">内容</button>
+      <button :class="{active: tab==='behavior'}" @click="setTab('behavior')">行为</button>
+      <button :class="{active: tab==='ip'}" @click="setTab('ip')">IP 查询</button>
+    </nav>
+  </header>
+
+  <div class="global-msg" x-show="error" x-transition role="alert" aria-live="assertive">
+    <span x-text="error"></span>
+    <span class="row">
+      <a role="button" class="secondary" x-show="needsLogin" href="/admin/api/config">去登录 Access（完成后返回面板）</a>
+      <button type="button" @click="error=''; needsLogin=false">关闭</button>
+    </span>
+  </div>
+  <div class="toast-stack" aria-live="polite">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="toast" x-text="t.message"></div>
+    </template>
+  </div>
+
+  <main class="container">
+    <section x-show="tab==='dashboard'">
+      <div class="row-between">
+        <h2>仪表盘</h2>
+        <div class="row">
+          <label class="inline-label">时间范围
+            <select x-model="overviewRange" @change="loadOverview()">
+              <option value="today">今日(自然日)</option>
+              <option value="6">近 6 小时</option>
+              <option value="24">近 24 小时</option>
+              <option value="72">近 72 小时</option>
+              <option value="168">近 7 天</option>
+            </select>
+          </label>
+          <button @click="loadOverview()">刷新</button>
+        </div>
+      </div>
+      <p class="muted" x-show="overview.unavailable" x-text="overview.note || '统计服务暂不可用,数据可能为 0'"></p>
+      <p class="muted">统计基于逐请求日志（D1），仅覆盖日志保留期内的数据；无需 Analytics Engine。</p>
+      <div class="cards">
+        <article class="metric"><h3 x-text="overview.requests"></h3><p>请求数</p></article>
+        <article class="metric"><h3 x-text="overview.chars"></h3><p>输出字符</p></article>
+        <article class="metric"><h3 x-text="overview.errors"></h3><p>错误数</p></article>
+        <article class="metric"><h3 x-text="overview.activeIps"></h3><p>活跃 IP</p></article>
+      </div>
+      <article>
+        <div class="row-between">
+          <h3>请求时序</h3>
+          <span class="muted" x-show="overview.series && overview.series.length">峰值 <span x-text="overviewMax()"></span> 次</span>
+        </div>
+        <div class="chart" x-show="overview.series && overview.series.length">
+          <template x-for="(s, i) in overview.series" :key="s.t">
+            <div class="bar-wrap">
+              <span class="bar-value" x-show="overview.series.length <= 24" x-text="s.requests"></span>
+              <div class="bar" :style="'height:' + barHeight(s.requests) + 'px'" :title="fmtTimeAny(s.t) + ' · ' + s.requests + ' 次 · ' + s.chars + ' 字符'"></div>
+              <span class="bar-label" x-show="i % tickEvery(overview.series.length) === 0" x-text="chartTickLabel(s.t)"></span>
+            </div>
+          </template>
+        </div>
+        <p class="muted" x-show="!overview.series || !overview.series.length">暂无数据</p>
+        <p class="muted" x-show="overview.series && overview.series.length > 24">为便于阅读，横轴标签已抽稀；鼠标悬停任意柱子可查看具体时间与数值。</p>
+      </article>
+    </section>
+    <section x-show="tab==='limits'">
+      <div class="row-between">
+        <h2>限流</h2>
+        <button @click="reloadLimits()">刷新</button>
+      </div>
+
+      <article>
+        <h3>总体策略</h3>
+        <div class="policy-row">
+          <span>未登记 IP 默认策略</span>
+          <span class="tag" :class="config.unlisted_ip_policy==='deny' ? 'tag-off' : 'tag-ok'" x-text="config.unlisted_ip_policy==='deny' ? '禁止(403)' : '允许(按全局规则限流)'"></span>
+          <button class="secondary outline" @click="tab='behavior'">前往行为配置修改</button>
+        </div>
+        <p class="muted">判定顺序：单 IP 专属规则 → IP 组(按优先级) → 全局规则 → 未登记 IP 默认策略。命中一个层级后不再向下匹配；未登记策略在「行为」页保存后生效。</p>
+
+        <div class="row-between subsection">
+          <h4>全局规则</h4>
+          <button class="secondary outline" @click="openGlobalRulesEditor()">编辑全部规则</button>
+        </div>
+        <p class="muted">对所有被允许的 IP 生效;多条规则同时生效,任意一条用尽即触发限流;可在「IP 查询」查看逐条剩余。</p>
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>规则</th><th>状态</th><th>备注</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="r in rules" :key="r.id">
+              <tr>
+                <td x-text="humanRule(r)"></td>
+                <td><span class="tag" :class="r.enabled ? 'tag-ok' : 'tag-off'" x-text="r.enabled ? '启用' : '停用'"></span></td>
+                <td x-text="r.note || ''"></td>
+                <td class="actions">
+                  <button class="secondary outline" @click="openGlobalRuleEditor(r)">编辑</button>
+                  <button class="secondary outline btn-danger" @click="deleteRule(r)">删除</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!rules.length"><td colspan="4" class="muted">暂无全局规则（点击右上角「编辑全部规则」添加；未配置时不做字符限额）</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </article>
+
+      <article>
+        <div class="row-between">
+          <h3>IP 组</h3>
+          <button @click="newGroup()">新建 IP 组</button>
+        </div>
+        <p class="muted">优先级数字越小越先匹配;组内规则留空表示继承全局规则。</p>
+        <div class="group-cards">
+          <template x-for="g in ipGroups" :key="g.id">
+            <div class="group-card">
+              <div class="row-between">
+                <strong x-text="g.name"></strong>
+                <span class="tag" :class="g.enabled ? 'tag-ok' : 'tag-off'" x-text="g.enabled ? '启用' : '停用'"></span>
+              </div>
+              <p class="muted card-meta">
+                优先级 <span x-text="g.priority"></span> ·
+                并发 <span x-text="g.concurrency == null ? '默认' : g.concurrency"></span> ·
+                成员 <span x-text="groupMemberCount(g)"></span>
+              </p>
+              <p class="rule-summary" x-text="rulesSummary(g.rules)"></p>
+              <div class="row">
+                <button class="secondary outline" @click="editGroup(g)">编辑</button>
+                <button class="secondary outline" @click="openMembers(g)">成员管理</button>
+                <button class="secondary outline btn-danger" @click="deleteGroup(g)">删除</button>
+              </div>
+            </div>
+          </template>
+          <p class="muted" x-show="!ipGroups.length">暂无 IP 组，点击右上角「新建 IP 组」创建；组内成员将按组规则限流。</p>
+        </div>
+
+        <div class="panel" x-show="groupForm.open">
+          <h4 x-text="groupForm.id ? '编辑 IP 组' : '新建 IP 组'"></h4>
+          <form class="grid-form" @submit.prevent="saveGroup()">
+            <label>名称<input type="text" x-model="groupForm.name" required></label>
+            <label>优先级<input type="number" step="1" x-model.number="groupForm.priority"><small class="muted">数字越小越先匹配</small></label>
+            <label>并发上限<input type="number" min="1" step="1" x-model="groupForm.concurrency"><small class="muted">留空继承「行为」页的每 IP 并发上限</small></label>
+            <label>备注<input type="text" x-model="groupForm.note"></label>
+            <label class="check"><input type="checkbox" x-model="groupForm.enabled"> 启用该组</label>
+            <div class="wide">
+              <span class="muted">规则(留空继承全局规则)</span>
+              <ul class="rule-list">
+                <template x-for="(r, i) in groupForm.rules" :key="i">
+                  <li x-text="humanRule(r)"></li>
+                </template>
+                <li class="muted" x-show="!groupForm.rules.length">当前无独立规则,继承全局规则</li>
+              </ul>
+              <button type="button" class="secondary outline" @click="openRuleEditorFor('group')">编辑规则</button>
+            </div>
+            <div class="row">
+              <button type="submit" :disabled="savingGroup" x-text="savingGroup ? '保存中…' : (groupForm.id ? '保存组' : '创建组')"></button>
+              <button type="button" class="secondary" @click="resetGroupForm()">取消</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel" x-show="membersPanel.open">
+          <div class="row-between">
+            <h4>成员管理:<span x-text="membersPanel.groupName"></span></h4>
+            <button class="secondary outline" @click="closeMembers()">关闭</button>
+          </div>
+          <div class="table-wrap">
+          <table>
+            <thead><tr><th>值</th><th>类型</th><th>操作</th></tr></thead>
+            <tbody>
+              <template x-for="m in membersPanel.list" :key="m.value">
+                <tr>
+                  <td><code x-text="m.value"></code></td>
+                  <td x-text="m.kind === 'cidr' ? 'CIDR' : '单 IP'"></td>
+                  <td class="actions"><button class="secondary outline btn-danger" @click="deleteMember(m)">删除</button></td>
+                </tr>
+              </template>
+              <tr x-show="!membersPanel.list.length"><td colspan="3" class="muted" x-text="membersPanel.loading ? '加载中…' : '暂无成员'"></td></tr>
+            </tbody>
+          </table>
+          </div>
+          <label class="wide">批量添加(每行一个 IP 或 CIDR)
+            <textarea rows="4" x-model="membersPanel.text" placeholder="1.2.3.4&#10;10.0.0.0/8"></textarea>
+          </label>
+          <p class="status-bad" x-show="membersPanel.invalid.length">无效行:<span x-text="membersPanel.invalid.join('、')"></span></p>
+          <p class="status-ok" x-show="membersPanel.addedCount > 0">已添加 <span x-text="membersPanel.addedCount"></span> 条</p>
+          <div class="row">
+            <button @click="submitMembers()" :disabled="membersPanel.saving" x-text="membersPanel.saving ? '提交中…' : '提交'"></button>
+          </div>
+        </div>
+      </article>
+      <article>
+        <div class="row-between">
+          <h3>单 IP 专属规则</h3>
+          <span class="muted">优先级最高，可为某个 IP 单独指定并发与规则</span>
+        </div>
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>IP</th><th>并发</th><th>规则</th><th>过期</th><th>备注</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="o in overrides" :key="o.ip">
+              <tr>
+                <td x-text="o.ip"></td>
+                <td x-text="o.concurrency == null ? '默认' : o.concurrency"></td>
+                <td x-text="rulesSummary(o.rules)"></td>
+                <td x-text="o.expiresAt ? fmtTime(o.expiresAt) : '永久'"></td>
+                <td x-text="o.note || ''"></td>
+                <td class="actions">
+                  <button class="secondary outline" @click="editOverride(o)">编辑</button>
+                  <button class="secondary outline btn-danger" @click="deleteOverride(o)">删除</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!overrides.length"><td colspan="6" class="muted">暂无专属规则，可在下方为指定 IP 单独配置</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <form class="grid-form" @submit.prevent="saveOverride()">
+          <label>IP 地址<input type="text" x-model="overrideForm.ip" :readonly="overrideForm.editing" placeholder="1.2.3.4" required></label>
+          <label>并发上限<input type="number" min="1" step="1" x-model="overrideForm.concurrency"><small class="muted">留空继承默认的每 IP 并发上限</small></label>
+          <label>过期时间<input type="datetime-local" x-model="overrideForm.expires_at"><small class="muted">留空表示永久</small></label>
+          <label>备注<input type="text" x-model="overrideForm.note"></label>
+          <div class="wide">
+            <span class="muted">规则(留空使用全局规则)</span>
+            <ul class="rule-list">
+              <template x-for="(r, i) in overrideForm.rules" :key="i">
+                <li x-text="humanRule(r)"></li>
+              </template>
+              <li class="muted" x-show="!overrideForm.rules.length">当前无独立规则,使用全局规则</li>
+            </ul>
+            <button type="button" class="secondary outline" @click="openRuleEditorFor('override')">编辑规则</button>
+          </div>
+          <div class="row">
+            <button type="submit" :disabled="savingOverride" x-text="savingOverride ? '保存中…' : (overrideForm.editing ? '保存专属规则' : '新增专属规则')"></button>
+            <button type="button" class="secondary" x-show="overrideForm.editing" @click="resetOverrideForm()">取消</button>
+          </div>
+        </form>
+      </article>
+    </section>
+    <section x-show="tab==='keys'">
+      <div class="row-between">
+        <h2>API Keys</h2>
+        <button @click="loadKeys()">刷新</button>
+      </div>
+      <article>
+        <h3 x-text="keyForm.id ? '编辑 Key' : '创建 Key'"></h3>
+        <p class="muted" x-show="!keyForm.id">创建后明文仅显示一次，请立即复制保存。点击表格行内的「更多」可查看用量、IP、状态与请求日志。</p>
+        <form class="grid-form" @submit.prevent="saveKey()">
+          <label>名称<input type="text" x-model="keyForm.name" required></label>
+          <label>配额模式
+            <select x-model="keyForm.quota_mode">
+              <option value="unlimited">不限(仍受 IP 并发与字符规则限制)</option>
+              <option value="per_ip">按 IP 独立配额</option>
+              <option value="total">单 Key 总额度(所有 IP 共享)</option>
+            </select>
+          </label>
+          <label>过期时间<input type="datetime-local" x-model="keyForm.expires_at"><small class="muted">留空表示永久</small></label>
+          <label>备注<input type="text" x-model="keyForm.note"></label>
+          <div class="wide" x-show="keyForm.quota_mode !== 'unlimited'">
+            <span class="muted">配额规则(多条取最小剩余)</span>
+            <ul class="rule-list">
+              <template x-for="(r, i) in keyForm.quotaRules" :key="i">
+                <li x-text="humanRule(r)"></li>
+              </template>
+              <li class="muted" x-show="!keyForm.quotaRules.length">暂无规则,请点击下方按钮添加</li>
+            </ul>
+            <button type="button" class="secondary outline" @click="openRuleEditorFor('key')">编辑配额规则</button>
+          </div>
+          <div class="row">
+            <button type="submit" :disabled="savingKey" x-text="savingKey ? '保存中…' : (keyForm.id ? '保存 Key' : '创建 Key')"></button>
+            <button type="button" class="secondary" x-show="keyForm.id" @click="resetKeyForm()">取消</button>
+          </div>
+        </form>
+      </article>
+
+      <article>
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>名称</th><th>前缀</th><th>模式</th><th>启用</th><th>过期</th><th>备注</th><th>操作</th></tr></thead>
+          <tbody x-show="!keys.length"><tr><td colspan="7" class="muted">暂无 Key，请使用上方表单创建第一个</td></tr></tbody>
+          <template x-for="k in keys" :key="k.id">
+            <tbody>
+              <tr>
+                <td x-text="k.name"></td>
+                <td><code x-text="k.keyPrefix"></code></td>
+                <td x-text="quotaModeText(k)"></td>
+                <td><span class="tag" :class="k.enabled ? 'tag-ok' : 'tag-off'" x-text="k.enabled ? '启用' : '停用'"></span></td>
+                <td x-text="k.expiresAt ? fmtTime(k.expiresAt) : '永久'"></td>
+                <td x-text="k.note || ''"></td>
+                <td class="actions">
+                  <button class="secondary outline" @click="editKey(k)">编辑</button>
+                  <button class="secondary outline" @click="openKeyMenu = openKeyMenu===k.id ? null : k.id" x-text="openKeyMenu===k.id ? '收起' : '更多'"></button>
+                </td>
+              </tr>
+              <tr class="menu-row" x-show="openKeyMenu===k.id">
+                <td colspan="7">
+                  <div class="row">
+                    <button class="secondary outline" @click="toggleKey(k)" x-text="k.enabled ? '停用' : '启用'"></button>
+                    <button class="secondary outline" @click="loadKeyUsage(k)">用量</button>
+                    <button class="secondary outline" @click="loadKeyIps(k)">IP</button>
+                    <button class="secondary outline" @click="loadKeyStatus(k)">状态</button>
+                    <button class="secondary outline" @click="openKeyLogs(k)">请求日志</button>
+                    <button class="secondary outline btn-danger" @click="resetKey(k)">重置</button>
+                    <button class="secondary outline btn-danger" @click="deleteKey(k)">删除</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </template>
+        </table>
+        </div>
+      </article>
+
+      <article x-show="keyDetail.open">
+        <div class="row-between">
+          <h3>Key 详情：<span x-text="keyDetail.keyName"></span></h3>
+          <button class="secondary outline" @click="closeKeyDetail()">关闭</button>
+        </div>
+        <div class="detail-tabs" role="tablist">
+          <button :class="{active: keyDetail.tab==='usage'}" @click="switchKeyDetail('usage')">用量</button>
+          <button :class="{active: keyDetail.tab==='ips'}" @click="switchKeyDetail('ips')">调用 IP</button>
+          <button :class="{active: keyDetail.tab==='status'}" @click="switchKeyDetail('status')">实时状态</button>
+          <button :class="{active: keyDetail.tab==='logs'}" @click="switchKeyDetail('logs')">请求日志</button>
+        </div>
+
+        <div x-show="keyDetail.tab==='usage'">
+          <p class="muted" x-show="keyUsage && keyUsage.unavailable" x-text="(keyUsage && keyUsage.note) || '统计服务暂不可用'"></p>
+          <div class="cards">
+            <div class="metric"><h3 x-text="keyUsage && keyUsage.requests"></h3><p>请求数</p></div>
+            <div class="metric"><h3 x-text="keyUsage && keyUsage.chars"></h3><p>输出字符</p></div>
+          </div>
+          <div class="row-between" x-show="keyUsage && keyUsage.series && keyUsage.series.length">
+            <span class="muted">近 7 天趋势</span>
+            <span class="muted">峰值 <span x-text="usageMax()"></span> 次</span>
+          </div>
+          <div class="chart" x-show="keyUsage && keyUsage.series && keyUsage.series.length">
+            <template x-for="(s, i) in (keyUsage ? keyUsage.series : [])" :key="s.t">
+              <div class="bar-wrap">
+                <div class="bar" :style="'height:' + usageBarHeight(s.requests) + 'px'" :title="fmtTimeAny(s.t) + ' · ' + s.requests + ' 次'"></div>
+                <span class="bar-label" x-show="i % tickEvery(keyUsage.series.length) === 0" x-text="usageTickLabel(s.t)"></span>
+              </div>
+            </template>
+          </div>
+          <p class="muted" x-show="!keyUsage || !keyUsage.series || !keyUsage.series.length">暂无用量数据</p>
+        </div>
+
+        <div x-show="keyDetail.tab==='ips'">
+          <div class="table-wrap">
+          <table x-show="keyIps.length">
+            <thead><tr><th>IP</th><th>请求数</th><th>字符</th><th>来源</th><th>最近</th></tr></thead>
+            <tbody>
+              <template x-for="row in keyIps" :key="row.ip">
+                <tr>
+                  <td><code x-text="row.ip"></code></td>
+                  <td x-text="row.requests == null ? '' : row.requests"></td>
+                  <td x-text="row.chars == null ? '' : row.chars"></td>
+                  <td><span class="tag" :class="row.live ? 'tag-live' : 'tag-off'" x-text="row.live ? '实时' : '历史'"></span></td>
+                  <td x-text="keyIpLastSeen(row)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          </div>
+          <p class="muted" x-show="!keyIps.length">暂无数据。历史行来自请求日志聚合（受日志保留期限制），实时行来自当前活跃请求。</p>
+        </div>
+
+        <div x-show="keyDetail.tab==='status'">
+          <template x-if="!keyStatus">
+            <p class="muted">加载中…</p>
+          </template>
+          <template x-if="keyStatus">
+            <div>
+              <h5>进行中的请求</h5>
+              <ul class="rule-list">
+                <template x-for="(row, i) in statusInflightRows(keyStatus)" :key="i">
+                  <li x-text="row.scope + '：' + row.count + ' 个'"></li>
+                </template>
+                <li class="muted" x-show="!statusInflightRows(keyStatus).length">当前没有进行中的请求</li>
+              </ul>
+              <h5>窗口用量</h5>
+              <ul class="rule-list">
+                <template x-for="(row, i) in statusWindowRows(keyStatus)" :key="i">
+                  <li x-text="row.scope + ' · 每 ' + humanWindowText(row.windowSeconds) + '：已用 ' + row.used + ' 字符'"></li>
+                </template>
+                <li class="muted" x-show="!statusWindowRows(keyStatus).length">当前无窗口用量</li>
+              </ul>
+              <h5>内容轮换计数</h5>
+              <ul class="rule-list">
+                <template x-for="(row, i) in statusRotationRows(keyStatus)" :key="i">
+                  <li x-text="row.key + '：' + row.count + ' 次'"></li>
+                </template>
+                <li class="muted" x-show="!statusRotationRows(keyStatus).length">无轮换计数</li>
+              </ul>
+              <details>
+                <summary class="muted">开发者信息（原始 JSON）</summary>
+                <pre class="json" x-text="JSON.stringify(keyStatus, null, 2)"></pre>
+              </details>
+            </div>
+          </template>
+        </div>
+
+        <div x-show="keyDetail.tab==='logs'">
+          <div class="row-between">
+            <p class="muted" x-show="logPanel.mode==='ip'">该来源 IP 的全部请求（跨 Key）</p>
+            <div class="row">
+              <button class="secondary outline" x-show="logPanel.mode==='ip' && logPanel.keyId" @click="backToKeyLogs()">返回该 Key</button>
+              <button class="secondary outline" :disabled="logPanel.loading" @click="guard(() => loadLogs(true))">刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+          <table x-show="logPanel.items.length">
+            <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>输入/输出 token（模拟）</th><th>耗时</th><th>来源 IP</th><th>流式</th></tr></thead>
+            <tbody>
+              <template x-for="row in logPanel.items" :key="row.id">
+                <tr>
+                  <td x-text="fmtTime(row.createdAt)"></td>
+                  <td x-text="row.model"></td>
+                  <td x-text="row.status"></td>
+                  <td x-text="logTokenText(row)"></td>
+                  <td x-text="(row.durationMs || 0) + ' ms'"></td>
+                  <td><button type="button" class="secondary outline" @click="openIpLogs(row.ip)"><code x-text="row.ip"></code></button></td>
+                  <td x-text="row.isStream ? '是' : '否'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          </div>
+          <p class="muted" x-show="!logPanel.items.length" x-text="logPanel.loading ? '加载中…' : '暂无请求日志'"></p>
+          <div class="row" x-show="logPanel.nextBefore">
+            <button class="secondary outline" :disabled="logPanel.loading" @click="guard(() => loadLogs(false))">加载更多</button>
+          </div>
+        </div>
+      </article>
+    </section>
+    <section x-show="tab==='content'">
+      <div class="row-between">
+        <h2>内容方案</h2>
+        <button @click="loadProfiles()">刷新</button>
+      </div>
+      <div class="split">
+        <aside>
+          <button class="secondary outline" @click="newProfile()">新建方案</button>
+          <ul class="list">
+            <template x-for="p in profiles" :key="p.id">
+              <li>
+                <button type="button" class="list-item" :class="{active: profileForm.id === p.id}" @click="editProfile(p)">
+                  <span x-text="p.name"></span>
+                  <small x-text="p.modelId + (profilePacingText(p) ? ' · ' + profilePacingText(p) : '')"></small>
+                </button>
+              </li>
+            </template>
+            <li class="muted" x-show="!profiles.length">暂无方案，点击上方「新建方案」开始</li>
+          </ul>
+        </aside>
+        <div>
+          <form class="grid-form" @submit.prevent="saveProfile()">
+            <label>名称<input type="text" x-model="profileForm.name" required></label>
+            <label>模型 ID(model_id)<input type="text" x-model="profileForm.modelId" required><small class="muted">客户端请求体里的 model 名;未知 model 时回退到默认方案</small></label>
+            <label>首字延迟覆盖(毫秒)<input type="number" min="0" max="60000" step="1" x-model="profileForm.firstDelayMs" placeholder="继承全局"><small class="muted">留空继承「行为」页的全局值；0 表示不等待</small></label>
+            <label>输出速度覆盖(字符/秒)<input type="number" min="0.5" max="1000" step="0.5" x-model="profileForm.charsPerSecond" placeholder="继承全局"><small class="muted">留空继承「行为」页的全局值</small></label>
+            <label class="check"><input type="checkbox" x-model="profileForm.isDefault"> 默认方案</label>
+            <label class="check"><input type="checkbox" x-model="profileForm.enabled"> 启用</label>
+            <div class="wide">
+              <div class="row-between">
+                <div class="mode-switch">
+                  <button type="button" :class="{active: profileMode==='blocks'}" @click="setProfileMode('blocks')">积木编辑</button>
+                  <button type="button" :class="{active: profileMode==='json'}" @click="setProfileMode('json')">JSON 编辑</button>
+                </div>
+                <span class="muted" x-show="blockly.loading">积木编辑器加载中…</span>
+              </div>
+              <div class="row example-row">
+                <span class="muted">插入示例：</span>
+                <template x-for="example in profileExamples" :key="example.key">
+                  <button type="button" class="secondary outline" @click="insertProfileExample(example.key)" x-text="example.label"></button>
+                </template>
+              </div>
+              <p class="status-bad" x-show="blockly.error" x-text="blockly.error"></p>
+              <div id="blockly-host" class="blockly-host" x-show="profileMode==='blocks'"></div>
+              <textarea x-show="profileMode==='json'" rows="14" x-model="profileForm.programText"></textarea>
+            </div>
+            <div class="row">
+              <button type="button" class="secondary" @click="validateProfile()">校验</button>
+              <button type="button" class="secondary" @click="previewProfile()">预览</button>
+              <button type="submit" :disabled="savingProfile" x-text="savingProfile ? '保存中…' : (profileForm.id ? '保存方案' : '创建方案')"></button>
+              <button type="button" class="secondary outline btn-danger" x-show="profileForm.id" @click="deleteProfile()">删除</button>
+            </div>
+          </form>
+
+          <article x-show="validateResult">
+            <h4>校验结果</h4>
+            <p :class="validateResult && validateResult.ok ? 'status-ok' : 'status-bad'"
+               x-text="validateResult ? (validateResult.ok ? '通过' : '失败') : ''"></p>
+            <ul x-show="validateResult && validateResult.errors && validateResult.errors.length">
+              <template x-for="(e, i) in (validateResult && validateResult.errors ? validateResult.errors : [])" :key="i">
+                <li x-text="humanizeDetail(e)"></li>
+              </template>
+            </ul>
+          </article>
+
+          <article x-show="preview">
+            <div class="row-between">
+              <h4>预览(预算 2000 字符)</h4>
+              <button class="secondary outline" @click="preview=null">关闭</button>
+            </div>
+            <pre class="json preview-text" x-text="previewDisplay()"></pre>
+            <p class="muted" x-show="preview && preview.truncated">已达到 2000 字符预算,输出被截断。</p>
+            <p class="muted">零宽字符以 [U+200B] 形式标注,便于确认输出并非空白。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section x-show="tab==='behavior'">
+      <div class="row-between">
+        <h2>行为配置</h2>
+        <button @click="loadConfig()">刷新</button>
+      </div>
+      <article>
+        <form class="grid-form" @submit.prevent="saveConfig()">
+          <label>首字延迟(毫秒)<input type="number" min="0" max="60000" x-model="config.first_delay_ms" :class="fieldErrors.first_delay_ms ? 'field-invalid' : ''"><small class="muted">生成第一个字符前的等待时间</small><small class="status-bad" x-show="fieldErrors.first_delay_ms" x-text="fieldErrors.first_delay_ms"></small></label>
+          <label>输出速度(字符/秒)<input type="number" min="0.5" max="1000" step="0.5" x-model="config.chars_per_second" :class="fieldErrors.chars_per_second ? 'field-invalid' : ''"><small class="muted">流式输出速率</small><small class="status-bad" x-show="fieldErrors.chars_per_second" x-text="fieldErrors.chars_per_second"></small></label>
+          <label>分块大小(字符)<input type="number" min="1" max="256" x-model="config.chunk_size" :class="fieldErrors.chunk_size ? 'field-invalid' : ''"><small class="muted">每个流式分片的字符数</small><small class="status-bad" x-show="fieldErrors.chunk_size" x-text="fieldErrors.chunk_size"></small></label>
+          <label>时长上限(秒)<input type="number" min="1" x-model="config.max_duration_s" :class="fieldErrors.max_duration_s ? 'field-invalid' : ''"><small class="muted">单次请求最长生成时间</small><small class="status-bad" x-show="fieldErrors.max_duration_s" x-text="fieldErrors.max_duration_s"></small></label>
+          <label>单次输出字符上限<input type="number" min="1" x-model="config.max_output_chars" :class="fieldErrors.max_output_chars ? 'field-invalid' : ''"><small class="muted">单次响应最多输出的字符数</small><small class="status-bad" x-show="fieldErrors.max_output_chars" x-text="fieldErrors.max_output_chars"></small></label>
+          <label>每 IP 并发上限<input type="number" min="1" x-model="config.concurrency_limit" :class="fieldErrors.concurrency_limit ? 'field-invalid' : ''"><small class="muted">单个 IP(IPv6 按 /64 聚合)同时处理的请求数;IP 组/专属规则留空则继承此值</small><small class="status-bad" x-show="fieldErrors.concurrency_limit" x-text="fieldErrors.concurrency_limit"></small></label>
+          <label>超限行为
+            <select x-model="config.over_limit_behavior">
+              <option value="truncate">截断(输出到上限为止)</option>
+              <option value="reject">拒绝(返回 429)</option>
+            </select>
+          </label>
+          <label>默认模型<input type="text" x-model="config.default_model"><small class="muted">未知 model 的回退方案</small></label>
+          <label>严格模型
+            <select x-model="config.strict_model">
+              <option value="true">是(未知 model 返回 404)</option>
+              <option value="false">否(回退默认模型)</option>
+            </select>
+            <small class="muted">选「是」时客户端请求未知 model 会收到 404 报错;选「否」则回退到默认模型</small>
+          </label>
+          <label>CORS Origin<input type="text" x-model="config.cors_origin"><small class="muted">允许跨域访问的来源</small></label>
+          <label>鉴权模式
+            <select x-model="config.auth_mode">
+              <option value="off">不校验(谁都能用)</option>
+              <option value="optional">可选(有 Key 用 Key 配额)</option>
+              <option value="required">必须(无 Key 拒绝)</option>
+            </select>
+            <small class="muted" x-text="authModeHint()"></small>
+          </label>
+          <fieldset class="wide">
+            <legend>未登记 IP 默认策略</legend>
+            <div class="row">
+              <label class="inline-radio"><input type="radio" value="allow" x-model="config.unlisted_ip_policy"> 允许(继续按全局规则限流)</label>
+              <label class="inline-radio"><input type="radio" value="deny" x-model="config.unlisted_ip_policy"> 禁止(直接返回 403)</label>
+            </div>
+            <small class="muted">未命中单 IP 专属规则或 IP 组时使用；选「禁止」后这些 IP 的 /v1 请求直接返回 403（客户端会报无权限）。需点击「保存配置」后生效。</small>
+          </fieldset>
+          <label>统计时区偏移(分钟)<input type="number" min="-720" max="840" step="1" x-model="config.stats_tz_offset" :class="fieldErrors.stats_tz_offset ? 'field-invalid' : ''"><small class="muted">480 = UTC+8；仪表盘「今日」按此时区划分自然日</small><small class="status-bad" x-show="fieldErrors.stats_tz_offset" x-text="fieldErrors.stats_tz_offset"></small></label>
+          <label class="check wide"><input type="checkbox" x-model="config.request_log_enabled"> 记录逐请求日志<span class="muted">记录模型、状态、耗时、来源 IP、token 等元数据(不含消息正文),写入 D1;关闭可节省 D1 写额度</span></label>
+          <label>日志保留天数<input type="number" min="1" max="90" step="1" x-model="config.request_log_retention_days" :class="fieldErrors.request_log_retention_days ? 'field-invalid' : ''"><small class="muted">按来源 IP 与 Key 可查；每日 Cron 清理过期记录</small><small class="status-bad" x-show="fieldErrors.request_log_retention_days" x-text="fieldErrors.request_log_retention_days"></small></label>
+          <div class="row">
+            <button type="submit" :disabled="savingConfig" x-text="savingConfig ? '保存中…' : '保存配置'"></button>
+          </div>
+        </form>
+      </article>
+    </section>
+
+    <section x-show="tab==='ip'">
+      <div class="row-between">
+        <h2>IP 查询</h2>
+        <button @click="reloadIpTab()">刷新</button>
+      </div>
+      <article>
+        <form class="grid-form" @submit.prevent="resolveIpPolicy()">
+          <label>IP 地址<input type="text" x-model="ipQuery.ip" placeholder="1.2.3.4" required></label>
+          <div class="row">
+            <button type="submit">查询命中策略</button>
+            <button type="button" class="secondary outline" @click="loadIpStatus()">查询实时状态</button>
+            <button type="button" class="secondary outline btn-danger" @click="resetIp()">重置该 IP</button>
+          </div>
+        </form>
+        <div class="resolve-result" x-show="ipResolve">
+          <p>
+            <strong>命中:</strong>
+            <span :class="ipResolve && ipResolve.allowed ? 'status-ok' : 'status-bad'" x-text="ipResolve ? (ipResolve.allowed ? '允许' : '禁止') : ''"></span>
+            <span class="muted" x-text="ipResolve ? resolveSourceText(ipResolve) : ''"></span>
+          </p>
+          <p>当前并发:<span x-text="ipInflight()"></span>
+            / 上限:<span x-text="ipResolve && ipResolve.concurrency != null ? ipResolve.concurrency : '默认'"></span>
+            <span class="muted" x-show="ipResolve && ipResolve.unlistedPolicy"> · 未登记默认策略:<span x-text="ipResolve && ipResolve.unlistedPolicy === 'deny' ? '禁止' : '允许'"></span></span>
+          </p>
+          <p class="status-bad" x-show="ipRetryText()" x-text="ipRetryText()"></p>
+          <h5>生效规则</h5>
+          <ul class="rule-list">
+            <template x-for="(r, i) in resolveRules()" :key="i">
+              <li x-text="humanRule(r)"></li>
+            </template>
+            <li class="muted" x-show="!resolveRules().length">无独立规则（不做字符限额）</li>
+          </ul>
+          <h5>窗口用量</h5>
+          <ul class="rule-list">
+            <template x-for="(w, i) in resolveWindows()" :key="i">
+              <li x-text="windowText(w)"></li>
+            </template>
+            <li class="muted" x-show="!resolveWindows().length">当前无窗口用量</li>
+          </ul>
+        </div>
+        <div x-show="ipStatus">
+          <h5>DO 实时状态</h5>
+          <ul class="rule-list">
+            <template x-for="(row, i) in statusInflightRows(ipStatus)" :key="'i' + i">
+              <li x-text="'进行中请求 · ' + row.scope + '：' + row.count + ' 个'"></li>
+            </template>
+            <template x-for="(row, i) in statusWindowRows(ipStatus)" :key="'w' + i">
+              <li x-text="row.scope + ' · 每 ' + humanWindowText(row.windowSeconds) + '：已用 ' + row.used + ' 字符'"></li>
+            </template>
+            <li class="muted" x-show="!statusInflightRows(ipStatus).length && !statusWindowRows(ipStatus).length">该 IP 当前没有活跃用量</li>
+          </ul>
+          <details>
+            <summary class="muted">开发者信息（原始 JSON）</summary>
+            <pre class="json" x-text="JSON.stringify(ipStatus, null, 2)"></pre>
+          </details>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <div class="modal-backdrop" x-show="createdKey" x-transition role="dialog" aria-modal="true" aria-labelledby="created-key-title" @keydown.tab="trapFocus($event)" @keydown.escape.window="createdKey && confirmCloseCreatedKey()" x-effect="createdKey && $nextTick(() => $refs.copyKeyBtn && $refs.copyKeyBtn.focus())">
+    <article class="modal">
+      <h3 id="created-key-title">API Key 已创建</h3>
+      <p>请立即复制并妥善保存。此明文仅显示一次，之后无法再获取。</p>
+      <pre class="key-text" x-text="createdKey ? createdKey.key : ''"></pre>
+      <p class="muted">前缀:<code x-text="createdKey ? createdKey.keyPrefix : ''"></code></p>
+      <div class="row">
+        <button x-ref="copyKeyBtn" @click="copyKey(createdKey ? createdKey.key : '')">复制明文</button>
+        <button class="secondary" @click="createdKey=null">我已保存</button>
+      </div>
+    </article>
+  </div>
+
+  <div class="modal-backdrop" x-show="ruleEditor.open" x-transition @click.self="requestCloseRuleEditor()" @keydown.escape.window="ruleEditor.open && requestCloseRuleEditor()" @keydown.tab="trapFocus($event)" role="dialog" aria-modal="true" aria-labelledby="rule-editor-title" x-effect="ruleEditor.open && $nextTick(() => $refs.addRuleBtn && $refs.addRuleBtn.focus())">
+    <article class="modal modal-wide">
+      <h3 id="rule-editor-title" x-text="ruleEditor.title || '编辑规则'"></h3>
+      <p class="muted">窗口 = 数值 × 单位；限额单位为字符（仅统计输出）。多条规则同时生效，任意一条用尽即触发限流。</p>
+      <template x-for="(r, i) in ruleEditor.rules" :key="i">
+        <div class="rule-edit-row">
+          <label>窗口/限额模板
+            <select @change="applyRulePreset(r, $event.target.value)">
+              <option value="">自定义</option>
+              <template x-for="p in rulePresets" :key="p.seconds">
+                <option :value="String(p.seconds)" x-text="p.label"></option>
+              </template>
+            </select>
+          </label>
+          <label>窗口值<input type="number" min="1" step="1" x-model.number="r.value"></label>
+          <label>单位
+            <select x-model="r.unit">
+              <option value="seconds">秒</option>
+              <option value="minutes">分钟</option>
+              <option value="hours">小时</option>
+              <option value="days">天</option>
+            </select>
+          </label>
+          <label>限额(字符)<input type="number" min="0" step="1" x-model.number="r.limitChars"></label>
+          <label>备注<input type="text" x-model="r.note"></label>
+          <label class="check"><input type="checkbox" x-model="r.enabled"> 启用</label>
+          <div class="rule-edit-foot">
+            <span class="muted" x-text="rulePreview(r)"></span>
+            <button type="button" class="secondary outline btn-danger" @click="removeRuleRow(i)">删除本条</button>
+          </div>
+        </div>
+      </template>
+      <p class="muted" x-show="!ruleEditor.rules.length">暂无规则；点击「添加规则」新增一条。</p>
+      <p class="status-bad" x-show="ruleEditorError" x-text="ruleEditorError"></p>
+      <div class="row">
+        <button type="button" x-ref="addRuleBtn" class="secondary outline" @click="addRuleRow()">添加规则</button>
+        <button type="button" :disabled="savingRules" @click="confirmRuleEditor()" x-text="savingRules ? '保存中…' : '确定'"></button>
+        <button type="button" class="secondary" @click="requestCloseRuleEditor()">取消</button>
+      </div>
+    </article>
+  </div>
+</body>
+</html>

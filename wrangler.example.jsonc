@@ -1,0 +1,30 @@
+{
+  // 复制为 wrangler.jsonc 后按你的账号填写（该文件已被 .gitignore 忽略）。
+  "name": "loremium",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/v1/*", "/admin/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "loremium",
+      "database_id": "<your-d1-database-id>"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "LIMITER", "class_name": "Limiter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Limiter"] }],
+  "triggers": { "crons": ["0 4 * * *"] },
+  "vars": {
+    "ADMIN_HOST": "admin.example.com",
+    "ACCESS_TEAM_DOMAIN": "<your-team>.cloudflareaccess.com",
+    "ACCESS_AUD": "<your-access-application-aud>"
+  },
+  "observability": { "enabled": true }
+}
