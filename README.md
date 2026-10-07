@@ -98,4 +98,4 @@ node test/smoke.mjs https://<域名>
 
 ## 许可证
 
-待定。
+[GPL-3.0-only](LICENSE)。第三方组件（Alpine.js、Pico.css、Blockly 等）保留各自许可证，详见 `public/vendor/`。
